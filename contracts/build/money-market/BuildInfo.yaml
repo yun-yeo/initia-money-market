@@ -1,0 +1,26 @@
+---
+compiled_package_info:
+  package_name: money-market
+  address_alias_instantiation:
+    initia_std: "0000000000000000000000000000000000000000000000000000000000000001"
+    my_addr: 000000000000000000000000a0987fa18c716ef7d97d2cff7639ab81ed707ca4
+    relayer: 0000000000000000000000003d18d54532fc42e567090852db6eb21fa528f952
+    std: "0000000000000000000000000000000000000000000000000000000000000001"
+  source_digest: D2593ECFAB0077A68DA8CEE7AE661529DBD5FD515033630CE4DD76D0BF60A73E
+  build_flags:
+    dev_mode: false
+    test_mode: false
+    generate_docs: false
+    generate_abis: false
+    install_dir: "."
+    force_recompilation: false
+    lock_file: ~
+    additional_named_addresses: {}
+    architecture: ~
+    fetch_deps_only: false
+    skip_fetch_latest_git_deps: false
+    bytecode_version: ~
+dependencies:
+  - InitiaStdlib
+  - MoveNursery
+  - MoveStdlib

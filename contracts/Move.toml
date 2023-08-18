@@ -1,0 +1,10 @@
+[package]
+name = "money-market"
+version = "0.0.0"
+
+[dependencies]
+InitiaStdlib = { git = "https://github.com/initia-labs/testnet", subdir = "stone-9/move/initia_stdlib", rev = "main" }
+
+[addresses]
+std =  "0x1"
+my_addr = "0xA0987FA18C716EF7D97D2CFF7639AB81ED707CA4"
