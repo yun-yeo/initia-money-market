@@ -198,6 +198,8 @@ module my_addr::MoneyMarket {
 
     /// Assert current position's LTV is bigger or equal than `money_pool.min_ltv`
     fun assert_min_ltv<CollateralCoin, LoanCoin>(money_pool: &MoneyPool<LoanCoin>, position: &mut BorrowPosition<CollateralCoin, LoanCoin>) {
+        if (position.loan_amount == 0) return;
+
         let price = load_oracle_price<CollateralCoin, LoanCoin>();
         let ltv = decimal256::from_ratio_u64(
             coin::value(&position.collateral_coin),            // collateral value
@@ -223,13 +225,14 @@ module my_addr::MoneyMarket {
 
     public entry fun repay_script<CollateralCoin, LoanCoin>(borrower: &signer, pool_addr: address, repay_amount: u64, collateral_amount: u64) acquires MoneyPool, BorrowPosition {
         let repay_coin = coin::withdraw<LoanCoin>(borrower, repay_amount);
-        let collateral_coin = repay<CollateralCoin, LoanCoin>(borrower, pool_addr, repay_coin, collateral_amount);
+        let (left_repay_coin, collateral_coin) = repay<CollateralCoin, LoanCoin>(borrower, pool_addr, repay_coin, collateral_amount);
         let borrower_addr = signer::address_of(borrower);
         if (!coin::is_account_registered<CollateralCoin>(borrower_addr)) {
             coin::register<CollateralCoin>(borrower);
         };
 
         coin::deposit<CollateralCoin>(borrower_addr, collateral_coin);
+        coin::deposit<LoanCoin>(borrower_addr, left_repay_coin);
     }
 
     /// borrow loan coins with collateral coin
@@ -270,7 +273,7 @@ module my_addr::MoneyMarket {
     }
 
     /// repay loan coin with collateral coin withdrawal
-    public fun repay<CollateralCoin, LoanCoin>(borrower: &signer, pool_addr: address, repay_coin: Coin<LoanCoin>, collateral_amount: u64): Coin<CollateralCoin> acquires MoneyPool, BorrowPosition {
+    public fun repay<CollateralCoin, LoanCoin>(borrower: &signer, pool_addr: address, repay_coin: Coin<LoanCoin>, collateral_amount: u64): (Coin<LoanCoin>, Coin<CollateralCoin>) acquires MoneyPool, BorrowPosition {
         let borrower_addr = signer::address_of(borrower);
 
         assert!(exists<MoneyPool<LoanCoin>>(pool_addr), error::not_found(EMONEY_POOL_NOT_FOUND));
@@ -284,20 +287,27 @@ module my_addr::MoneyMarket {
         update_borrow_position<CollateralCoin, LoanCoin>(position, money_pool, block_time);
 
         let repay_amount = coin::value(&repay_coin);
-        assert!(position.loan_amount >= repay_amount, error::internal(EEXCEED_LOAN_AMOUNT));
+        let left_repay_coin = if (repay_amount > position.loan_amount) {
+            let actual_repay_amount = position.loan_amount;
 
-        // decrease loan amount and withdraw collteral coin
-        position.loan_amount = position.loan_amount - repay_amount;
+            position.loan_amount = 0;
+            money_pool.total_loan_amount = money_pool.total_loan_amount - actual_repay_amount;
+
+            coin::extract(&mut repay_coin, repay_amount - actual_repay_amount)
+        } else {
+            position.loan_amount = position.loan_amount - repay_amount;
+            money_pool.total_loan_amount = money_pool.total_loan_amount - repay_amount;
+
+            coin::zero<LoanCoin>()
+        };
+
         let collateral_coin = coin::extract(&mut position.collateral_coin, collateral_amount);
-        
-        // repay loan coin to money pool
         coin::merge(&mut money_pool.loan_coin, repay_coin);
-        money_pool.total_loan_amount = money_pool.total_loan_amount - repay_amount;
         
         // check min_ltv
         assert_min_ltv<CollateralCoin, LoanCoin>(money_pool, position);
         
-        collateral_coin
+        (left_repay_coin, collateral_coin)
     }
 
     //
@@ -400,8 +410,15 @@ module my_addr::MoneyMarket {
         min_liquidated_collateral_amount: u64,
     ) acquires MoneyPool, BorrowPosition {
         let liquidate_loan_coin = coin::withdraw<LoanCoin>(liquidator, liquidate_loan_amount);
-        let liquidated_collateral_coin = liquidate<CollateralCoin, LoanCoin>(pool_addr, borrower_addr, liquidate_loan_coin, min_liquidated_collateral_amount);
-        coin::deposit(signer::address_of(liquidator), liquidated_collateral_coin);
+        let (left_liquidate_loan_coin, liquidated_collateral_coin) = liquidate<CollateralCoin, LoanCoin>(pool_addr, borrower_addr, liquidate_loan_coin, min_liquidated_collateral_amount);
+        
+        let liquidator_addr = signer::address_of(liquidator);
+        if (!coin::is_account_registered<CollateralCoin>(liquidator_addr)) {
+            coin::register<LoanCoin>(liquidator);
+        };
+
+        coin::deposit(liquidator_addr, liquidated_collateral_coin);
+        coin::deposit(liquidator_addr, left_liquidate_loan_coin);
     }
 
     /// liquidate borrow position which means a liquidator buys discounted collaterals with loan coin
@@ -410,7 +427,7 @@ module my_addr::MoneyMarket {
         borrower_addr: address, 
         liquidate_loan_coin: Coin<LoanCoin>, 
         min_liquidated_collateral_amount: u64,
-    ): Coin<CollateralCoin> acquires MoneyPool, BorrowPosition {
+    ): (Coin<LoanCoin>, Coin<CollateralCoin>) acquires MoneyPool, BorrowPosition {
         assert!(exists<MoneyPool<LoanCoin>>(pool_addr), error::not_found(EMONEY_POOL_NOT_FOUND));
         assert!(exists<BorrowPosition<CollateralCoin, LoanCoin>>(borrower_addr), error::not_found(EBORROW_POSITION_NOT_FOUND));
 
@@ -428,8 +445,16 @@ module my_addr::MoneyMarket {
         );
         assert!(decimal256::val(&ltv) < decimal256::val(&money_pool.min_ltv), error::internal(EBORROW_POSITION_SAFE));
 
+        // extract over providen liquidate loan coin
+        let liquidate_loan_amount = coin::value(&liquidate_loan_coin);
+        let left_liquidate_loan_coin = if (liquidate_loan_amount > position.loan_amount) {
+            coin::extract(&mut liquidate_loan_coin, liquidate_loan_amount - position.loan_amount)
+        } else {
+            coin::zero()
+        };
+
+        let liquidate_loan_amount = coin::value(&liquidate_loan_coin);
         let liquidated_collateral_amount = {
-            let liquidate_loan_amount = coin::value(&liquidate_loan_coin);
             
             // let liquidated_collateral_amount = 1 / (1 / price * (1 - discount_rate)) * liquidate_loan_amount
             // = liquidate_loan_amount * price / (1 - discount_rate)
@@ -449,7 +474,10 @@ module my_addr::MoneyMarket {
 
         assert!(liquidated_collateral_amount >= min_liquidated_collateral_amount, error::internal(EMIN_AMOUNT));
 
+        // update position loan amount
+        position.loan_amount = position.loan_amount - liquidate_loan_amount;
+
         coin::merge(&mut money_pool.loan_coin, liquidate_loan_coin);
-        coin::extract(&mut position.collateral_coin, liquidated_collateral_amount)
+        (left_liquidate_loan_coin, coin::extract(&mut position.collateral_coin, liquidated_collateral_amount))
     }
 }
